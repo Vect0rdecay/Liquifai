@@ -11,7 +11,7 @@
 
 This is a 1.2 billion parameter language model from Liquid AI's LFM (Liquid Foundation Model) family, exported to ONNX in 4-bit quantized form. What makes it architecturally unusual — and worth studying at the graph level — is that it is **not a standard transformer**. Where GPT-style models repeat the same attention-plus-MLP block at every layer, LFM interleaves two fundamentally different sequence-mixing mechanisms: **1D depthwise convolutions** and **grouped query attention**. The graph structure makes this hybrid design legible in a way that weight inspection alone cannot.
 
-The model has 385 nodes, 348 initializers (stored weights/constants), and a maximum graph depth of 282 hops from input to output. It accepts 24 input tensors and produces 23 outputs — the asymmetry between those numbers already hints at the dual-cache architecture described below.
+The model has 385 nodes, 348 initializers (stored weights/constants), and a maximum graph depth of 283 hops from input to output. It accepts 24 input tensors and produces 23 outputs — the asymmetry between those numbers already hints at the dual-cache architecture described below.
 
 ---
 
@@ -22,8 +22,9 @@ The model has 385 nodes, 348 initializers (stored weights/constants), and a maxi
 | Graph Name | `main_graph` |
 | Total Nodes | 385 |
 | Initializers | 348 |
-| Max Graph Depth | 282–283 hops |
+| Max Graph Depth | 283 hops |
 | Max Fan-In | 7 inputs (at GroupQueryAttention nodes) |
+| Max Fan-Out | 6 outputs |
 | Longest Linear Chain | 1 |
 | Quantization | 4-bit (MatMulNBits) |
 | Architecture | Hybrid Conv-Attention LLM (16 layers) |
@@ -213,10 +214,12 @@ There is no softmax in the graph — the model outputs raw logits, and temperatu
 
 ### Structural Pattern Counts
 
+GraphSurgeon identifies 107 structural patterns across the graph. The per-node multimodal fusion count (84) reflects individual nodes where two or more computation paths converge; the aggregated feature fusion point count (42) groups these by functional role.
+
 | Pattern Type | Count | Example Nodes |
 |-------------|-------|---------------|
+| Multimodal Fusion Points (2+ inputs, per-node) | 84 | Add, Concat, gating Mul, Conv_Input nodes across all layers |
 | High Fan-In Nodes (7 inputs) | 6 | `layers.{2,5,8,10,12,14}/attn/GroupQueryAttention` |
-| Multimodal Fusion Points (2 inputs) | 48 | All Add, Concat, and gating Mul nodes |
 | Perturbation Fusion (Concat, axis=2) | 10 | `layers.{0,1,3,4,6,7,9,11,13,15}/conv/Conv_Input` |
 | Residual Chain (no gradient regularization) | 32 blocks | `layers.*/Add_1`, `layers.*/Add_2` |
 | Saturating Activations | 16 | `layers.*/mlp/act_fn/Sigmoid` |
@@ -224,6 +227,7 @@ There is no softmax in the graph — the model outputs raw logits, and temperatu
 | Valid Conv (pads=0, boundary-sensitive) | 10 | `layers.{0,1,3,4,6,7,9,11,13,15}/conv/Conv` |
 | ShadowLogic: Deep Architecture Risk (depth=283) | 1 | Full graph |
 | In-Graph Preprocessing | 5 layers | Mask subgraph: Sub, Cast, Gather, Mul nodes |
+| **Total Structural Patterns** | **107** | |
 
 ### Gradient Flow Characteristics
 
@@ -237,9 +241,39 @@ GraphSurgeon identifies 42 fusion operations (Add and Concat nodes) where signal
 
 The conv cache concat points are a different kind of fusion — they merge temporal information (past and present states) rather than parallel computation paths. An important observation from the graph is that the conv cache has **no gating or normalization at the concat boundary**: past and present states are simply concatenated and convolved. The convolution kernel (size 3) then determines how past and present information interact, but there is no explicit mechanism to detect or reject anomalous cached states.
 
+### Gadget Analysis
+
+GraphSurgeon's gadget framework identifies **47 exploitable graph primitives** classified by type and position within the execution graph. A gadget is a structural motif that an adversary can leverage as a building block for attacks, whether for gradient-based optimization, perturbation amplification, or injection camouflage.
+
+| Gadget Type | Count | Role |
+|------------|-------|------|
+| Skip Connection | 32 | Gradient highways enabling efficient PGD/C&W convergence |
+| Shape Operation | 4 | Tensor layout manipulation without semantic validation |
+| Spatial Attention | 3 | Channel gating mechanisms (partial defensive value) |
+| Multimodal Fusion Point | 3 | Multi-branch signal convergence for coordinated attacks |
+| Cross-Modal Fusion (Late) | 1 | Output-proximal fusion enabling late-stage perturbation injection |
+| Multimodal Fusion (Aggregate) | 1 | Global fusion pattern across the architecture |
+| In-Graph Preprocessing | 3 | Trust boundary nodes that transform inputs without validation |
+
+**Position distribution across the graph:**
+
+| Region | Gadget Count | Percentage |
+|--------|-------------|------------|
+| Early (layers 0-4) | 15 | 32% |
+| Middle (layers 5-11) | 31 | 66% |
+| Late (layers 12-15) | 1 | 2% |
+
+The middle layers concentrate two-thirds of all exploitable gadgets. This is a direct consequence of the topology: the middle region contains 227 of the graph's 385 nodes and includes more attention blocks with their wider fan-in patterns, creating denser opportunities for perturbation convergence.
+
+The 5 highest-priority gradient highway gadgets are all early-layer skip connections with distances ranging from 251 to 273 hops. These long-distance residual paths mean that a perturbation injected at layer 0 can reach the output through a gradient highway spanning 96% of the graph's depth. Mean skip distance across the flagged highways is 262 hops.
+
+The single late-stage gadget (a cross-modal fusion point) is noteworthy despite its isolation. Output-proximal gadgets have disproportionate impact because perturbations introduced at this stage have fewer opportunities to be attenuated by subsequent normalization or gating before reaching the logits.
+
+GraphSurgeon also identifies 3 defensive features: channel gating mechanisms at the first three SwiGLU activations. Research suggests these attention-like gating patterns reduce the effectiveness of sparse patch attacks, though they do not constitute a robust defense against targeted adversarial optimization.
+
 ### ShadowLogic Assessment
 
-GraphSurgeon's ShadowLogic analysis evaluates whether this model graph could be modified to contain a hidden backdoor — not whether one currently exists. The result: **no backdoor indicators detected** (no conditional operations like Where/If/Equal exist in the graph), but the structure scores 71/100 on injection susceptibility.
+GraphSurgeon's ShadowLogic analysis evaluates whether this model graph could be modified to contain a hidden backdoor, not whether one currently exists. The result: **no backdoor indicators detected** (no conditional operations like Where/If/Equal exist in the graph), but the structure scores 71/100 on injection susceptibility.
 
 The high score comes primarily from two factors:
 
@@ -272,7 +306,9 @@ The high score comes primarily from two factors:
 | branch_point | `/model/layers.1/Add_2` | moderate | hard |
 | branch_point | `/model/layers.2/Add_1` | moderate | hard |
 
-The 10 identified injection points cluster at the conv Concat nodes (where inserting a Where node before the concat could conditionally swap in attacker-controlled values) and at the residual Add nodes (where a conditional branch could selectively suppress the skip connection). The before-output injection points at Concat nodes are rated "trivial complexity" because the concat already merges two inputs — replacing one with a conditional switch requires adding only two nodes (a Constant for the malicious payload and a Where for the conditional).
+The 10 identified injection points cluster at the conv Concat nodes (where inserting a Where node before the concat could conditionally swap in attacker-controlled values) and at the residual Add nodes (where a conditional branch could selectively suppress the skip connection). The before-output injection points at Concat nodes are rated "trivial complexity" because the concat already merges two inputs, and replacing one with a conditional switch requires adding only two nodes (a Constant for the malicious payload and a Where for the conditional).
+
+A concrete injection scenario proceeds in three stages. First, trigger detection: additional nodes after the input layer compare incoming token patterns against an attacker-defined signature. Second, output override: at a targeted Concat or Add node (such as `/model/layers.0/conv/Conv_Input`), a Where node conditionally substitutes the normal computation with an attacker-controlled Constant tensor when the trigger is detected. Third, persistence: the backdoor survives format conversions (ONNX to TensorRT), survives fine-tuning on clean data (because the trigger pathway is rarely activated), and passes all standard test suites on non-triggered inputs. The model currently uses Gather, Slice, ReduceSum, and Concat operations that would provide statistical cover for injected trigger-detection nodes. The only genuinely anomalous additions would be conditional operators (Where, If, Equal), which the model currently uses none of.
 
 ### Attack Surface by Component
 
@@ -300,18 +336,20 @@ The patterns analysis maps architectural components to the attack classes they s
 
 ### Graph Workflow Targets
 
-These are the nodes GraphSurgeon identifies as highest-priority targets for adversarial analysis or counterfactual surgery:
+These are the nodes GraphSurgeon identifies as highest-priority targets for adversarial analysis or counterfactual surgery. The gadget analysis reinforces these classifications: 31 of 47 gadgets cluster in the middle layers (5-11), making that region the densest attack surface.
 
 **Gradient Bottlenecks** (potential defense insertion points):
 ```
 /model/layers.{0-15}/mlp/act_fn/Sigmoid  (16 nodes — all SwiGLU activations)
 ```
+The 5 flagged gradient highway gadgets span distances of 251-273 hops, with layers.0/Add_1 providing the longest unobstructed gradient path (273 hops, 96% of graph depth).
 
 **Feature Fusion Points** (perturbation convergence):
 ```
 /model/layers.{0,1,3,4,6,7,9,11,13,15}/conv/Conv_Input  (10 conv cache merges)
 /model/layers.{0-15}/Add_1, Add_2                         (32 residual connections)
 ```
+The gadget framework identifies 3 multimodal fusion gadgets and 1 cross-modal late-fusion gadget within this set, representing nodes where coordinated multi-branch attacks can amplify combined perturbation signals.
 
 **Amplification Layers** (signal magnification):
 ```

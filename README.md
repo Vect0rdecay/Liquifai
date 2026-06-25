@@ -32,4 +32,4 @@ The output is a structural map of the model that reveals architectural decisions
 
 ## Disclaimer
 
-An LLM assists with analyzing the raw data GraphSurgeon produces and with drafting the initial version of each report. All findings are reviewed and verified against the actual ONNX graph before publication.
+An LLM assists with analyzing the raw data GraphSurgeon produces and with drafting the initial version of each report.
