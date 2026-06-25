@@ -1,6 +1,6 @@
 # Liquifai
 
-Graph-level analysis of [Liquid AI's](https://www.liquid.ai/) foundation models in ONNX format, using [GraphSurgeon](https://github.com/Vect0rdecay/graph-surgeon).
+Graph-level analysis of [Liquid AI's](https://www.liquid.ai/) foundation models in ONNX format, using [GraphSurgeon](https://github.com/Vect0rdecay/GraphSurgeon).
 
 ## What This Is
 
@@ -29,3 +29,7 @@ The output is a structural map of the model that reveals architectural decisions
 **Graph topology.** Depth distribution, operator counts, fan-in characteristics, fusion point topology where multiple computation paths converge, and gradient flow across the residual chain.
 
 **Security-relevant motifs.** Where the analysis surfaces structurally notable patterns (ShadowLogic injection susceptibility, unprotected cache boundaries, gradient highways), it flags them alongside the architectural context that produces them.
+
+## Disclaimer
+
+An LLM assists with analyzing the raw data GraphSurgeon produces and with drafting the initial version of each report. All findings are reviewed and verified against the actual ONNX graph before publication.
