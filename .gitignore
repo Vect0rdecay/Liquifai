@@ -4,3 +4,4 @@ CLAUDE.md
 *.json
 flow.txt
 flow-narrative.txt
+*.jinja
