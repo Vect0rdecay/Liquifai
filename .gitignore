@@ -1,4 +1,6 @@
 CLAUDE.md
 *.onnx
 *.onnx_data
-*-motifs.json
+*.json
+flow.txt
+flow-narrative.txt
